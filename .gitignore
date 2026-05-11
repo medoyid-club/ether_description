@@ -1,0 +1,33 @@
+.env
+.env.local
+.env.*.local
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Secrets / OAuth / keys (do not commit)
+token.json
+token.json.bak
+API.txt
+client_secret*.json
+stream_key.txt
+
+# Local output / scratch
+*.log
+output/
+ether_des_output.txt
+
+# IDE / tools
+.cursor/
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# YouTube thumbnail under 2MB (generated locally)
+thumbnail_youtube_under_2mb.jpg
