@@ -5,4 +5,3 @@ google-api-python-client>=2.130.0
 google-auth>=2.29.0
 google-auth-oauthlib>=1.2.0
 Pillow>=10.2.0
-youtube-transcript-api>=1.2.0

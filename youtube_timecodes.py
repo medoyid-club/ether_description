@@ -1,18 +1,20 @@
 """
-Тайм-коди для опису відео: транскрипт (youtube-transcript-api) + Gemini → вставка перед блоком #тегів + оновлення через YouTube Data API.
+Тайм-коди для опису відео: субтитри через YouTube Data API (captions) + Gemini → вставка перед блоком #тегів.
 
-Окремо від SEO-майстра; потрібні ті самі OAuth `token.json`, що й для плейлистів / live.
+Окремо від SEO-майстра; потрібні ті самі OAuth `token.json`, що й для плейлистів / live
+(scope `youtube.force-ssl` — уже в youtube_oauth_setup.py).
 """
 
 from __future__ import annotations
 
+import io
 import logging
 import re
-import time
 from typing import Any
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaIoBaseDownload
 
 import gemini_generate
 import gemini_http
@@ -27,6 +29,14 @@ _VIDEO_ID_FROM_URL = re.compile(
     r"(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/live/|youtube\.com/shorts/)"
     r"([A-Za-z0-9_-]{11})"
 )
+
+_SRT_TIMESTAMP = re.compile(
+    r"(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})"
+)
+
+_ISO8601_DURATION = re.compile(r"^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$")
+
+_CAPTION_LANG_PRIORITY = ("uk", "ru", "en")
 
 
 class TimecodesPipelineError(RuntimeError):
@@ -70,87 +80,125 @@ def _language_instruction(code: str) -> str:
     return m.get(code, "the same language as the transcript (match the subtitles language exactly)")
 
 
-def _fetched_to_entries(fetched: Any) -> list[dict[str, Any]]:
-    """FetchedTranscript (або сумісний ітерабельний набір snippets) → list[dict]."""
-    out: list[dict[str, Any]] = []
-    for snippet in fetched:
-        if hasattr(snippet, "text"):
-            out.append(
-                {
-                    "text": str(getattr(snippet, "text", "") or ""),
-                    "start": float(getattr(snippet, "start", 0) or 0),
-                    "duration": float(getattr(snippet, "duration", 0) or 0),
-                }
-            )
-        elif isinstance(snippet, dict):
-            out.append(snippet)
-    return out
+def parse_iso8601_duration(raw: str) -> float:
+    """PT1H2M3S → секунди (YouTube contentDetails.duration)."""
+    m = _ISO8601_DURATION.match((raw or "").strip())
+    if not m:
+        return 0.0
+    hours, minutes, seconds = (int(part or 0) for part in m.groups())
+    return float(hours * 3600 + minutes * 60 + seconds)
 
 
-def fetch_transcript_entries(video_id: str) -> tuple[list[dict[str, Any]], str]:
-    """Повертає список сегментів {text, start, duration} та код мови субтитрів."""
+def _srt_timestamp_to_seconds(h: str, m: str, s: str, ms: str) -> float:
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+
+
+def parse_srt_captions(content: str) -> list[dict[str, Any]]:
+    """SRT → list[{text, start, duration}]."""
+    entries: list[dict[str, Any]] = []
+    for block in re.split(r"\n\s*\n", (content or "").strip()):
+        lines = [ln.rstrip() for ln in block.splitlines() if ln.strip()]
+        if len(lines) < 2:
+            continue
+
+        ts_idx = 1 if lines[0].strip().isdigit() else 0
+        if ts_idx >= len(lines):
+            continue
+
+        match = _SRT_TIMESTAMP.match(lines[ts_idx].strip())
+        if not match:
+            continue
+
+        start = _srt_timestamp_to_seconds(*match.groups()[:4])
+        end = _srt_timestamp_to_seconds(*match.groups()[4:8])
+        text = " ".join(line.strip() for line in lines[ts_idx + 1 :] if line.strip())
+        if not text:
+            continue
+        entries.append({"text": text, "start": start, "duration": max(0.0, end - start)})
+    return entries
+
+
+def _caption_track_sort_key(item: dict[str, Any]) -> tuple[int, int, str]:
+    snippet = item.get("snippet") or {}
+    lang = _normalize_transcript_lang(str(snippet.get("language") or ""))
     try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-    except ImportError as exc:
-        raise TimecodesPipelineError(
-            "Не встановлено пакет youtube-transcript-api. Виконайте: pip install youtube-transcript-api"
-        ) from exc
+        lang_rank = _CAPTION_LANG_PRIORITY.index(lang)
+    except ValueError:
+        lang_rank = len(_CAPTION_LANG_PRIORITY)
+    kind_rank = 0 if str(snippet.get("trackKind") or "") != "ASR" else 1
+    return (lang_rank, kind_rank, lang)
 
-    max_retries = 3
-    retry_delay = 2.0
-    outer_err: Exception | None = None
 
-    for attempt in range(max_retries):
-        last_err: Exception | None = None
-        try:
-            # API v1.2+: екземпляр + list() замість класових list_transcripts / get_transcript
-            api = YouTubeTranscriptApi()
-            transcript_list = api.list(video_id)
-            transcripts = list(transcript_list)
-            available = [t.language_code for t in transcripts]
-            log.info("Transcript langs for %s: %s", video_id, available)
+def _select_caption_track(items: list[dict[str, Any]]) -> dict[str, Any]:
+    return min(items, key=_caption_track_sort_key)
 
-            priority = ["uk", "ru", "en"]
-            for lang in priority:
-                if lang not in available:
-                    continue
-                try:
-                    tr = transcript_list.find_transcript([lang])
-                    fetched = tr.fetch()
-                    return _fetched_to_entries(fetched), tr.language_code
-                except Exception as e:
-                    log.warning("transcript fetch %s lang=%s: %s", video_id, lang, e)
-                    last_err = e
-                    continue
 
-            for tr in transcripts:
-                if tr.language_code in priority:
-                    continue
-                try:
-                    fetched = tr.fetch()
-                    return _fetched_to_entries(fetched), tr.language_code
-                except Exception as e:
-                    last_err = e
-                    continue
+def _download_caption_srt(service, caption_id: str) -> str:
+    request = service.captions().download(id=caption_id, tfmt="srt")
+    buffer = io.BytesIO()
+    downloader = MediaIoBaseDownload(buffer, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return buffer.getvalue().decode("utf-8", errors="replace")
 
+
+def fetch_caption_entries(service, video_id: str) -> tuple[list[dict[str, Any]], str]:
+    """
+    Завантажує субтитри власного відео через YouTube Data API (captions.list / captions.download).
+
+    Потрібен OAuth з youtube.force-ssl; працює з VPS без проксі, на відміну від публічного скрейпінгу.
+    """
+    try:
+        listed = service.captions().list(part="snippet", videoId=video_id).execute()
+    except HttpError as exc:
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        if status in (403, "403"):
             raise TimecodesPipelineError(
-                f"Немає доступного транскрипту для відео {video_id}. "
-                "Перевірте наявність субтитрів (авто або ручних) на YouTube."
-            ) from last_err
+                "YouTube API: немає доступу до субтитрів (403). "
+                "Перевірте, що token.json видано з scope youtube.force-ssl "
+                "(запустіть youtube_oauth_setup.py ще раз)."
+            ) from exc
+        raise TimecodesPipelineError(f"YouTube API captions.list: {exc}") from exc
 
-        except TimecodesPipelineError:
-            raise
-        except Exception as e:
-            outer_err = e
-            if attempt == max_retries - 1:
-                break
-            log.warning("transcript attempt %s failed: %s", attempt + 1, e)
-            time.sleep(retry_delay)
-            retry_delay *= 2
+    items = listed.get("items") or []
+    if not items:
+        raise TimecodesPipelineError(
+            f"Для відео {video_id} немає доріжок субтитрів у YouTube. "
+            "У Studio увімкніть автогенерацію або завантажте субтитри вручну."
+        )
 
-    raise TimecodesPipelineError(
-        f"Не вдалося завантажити транскрипт для {video_id}: {outer_err}"
-    ) from outer_err
+    available = [
+        f"{_normalize_transcript_lang(str((it.get('snippet') or {}).get('language') or ''))}"
+        f"({(it.get('snippet') or {}).get('trackKind', '?')})"
+        for it in items
+    ]
+    log.info("Caption tracks for %s via YouTube API: %s", video_id, available)
+
+    track = _select_caption_track(items)
+    snippet = track.get("snippet") or {}
+    caption_id = str(track["id"])
+    lang = _normalize_transcript_lang(str(snippet.get("language") or ""))
+
+    try:
+        srt_body = _download_caption_srt(service, caption_id)
+    except HttpError as exc:
+        raise TimecodesPipelineError(f"YouTube API captions.download: {exc}") from exc
+
+    entries = parse_srt_captions(srt_body)
+    if not entries:
+        raise TimecodesPipelineError(
+            f"Субтитри для {video_id} завантажено, але SRT порожній або не розпізнано."
+        )
+
+    log.info(
+        "Captions downloaded for %s: lang=%s segments=%s trackKind=%s",
+        video_id,
+        lang,
+        len(entries),
+        snippet.get("trackKind"),
+    )
+    return entries, lang
 
 
 def _format_time_hms(seconds: float) -> str:
@@ -484,8 +532,11 @@ def run_timecodes_preview(url_or_id: str) -> dict[str, Any]:
     title = str(snippet.get("title") or "").strip()
     old_desc = str(snippet.get("description") or "")
 
-    entries, tlang = fetch_transcript_entries(vid)
-    duration_sec = _duration_sec_from_entries(entries)
+    entries, tlang = fetch_caption_entries(service, vid)
+    cd = item.get("contentDetails") or {}
+    duration_sec = parse_iso8601_duration(str(cd.get("duration") or "")) or _duration_sec_from_entries(
+        entries
+    )
     duration_min = max(1, int(duration_sec // 60) or 1)
     transcript_fmt = format_transcript_with_timestamps(entries, video_duration_sec=duration_sec)
 
