@@ -33,7 +33,7 @@ nano .env
 ## Перевірка вручну
 
 ```bash
-cd /повний/шлях/до/ether_description
+cd ~/ether_description
 source .venv/bin/activate
 python main.py
 ```
@@ -42,7 +42,7 @@ python main.py
 
 ## Фон: systemd (користувацька служба)
 
-Замініть `YOU` та шлях до проєкту.
+Приклад для користувача **dzianis** і каталогу `~/ether_description` (хост **denis-server**). На іншому акаунті замініть `/home/dzianis/` на свій домашній каталог.
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -59,9 +59,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/YOU/ether_description
+WorkingDirectory=/home/dzianis/ether_description
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/YOU/ether_description/.venv/bin/python main.py
+ExecStart=/home/dzianis/ether_description/.venv/bin/python main.py
 Restart=on-failure
 RestartSec=15
 
@@ -86,7 +86,7 @@ loginctl enable-linger "$USER"
 ## Альтернатива без systemd
 
 ```bash
-cd /повний/шлях/до/ether_description
+cd ~/ether_description
 source .venv/bin/activate
 nohup python main.py >> bot.log 2>&1 &
 disown

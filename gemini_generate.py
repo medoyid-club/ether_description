@@ -93,6 +93,8 @@ def generate_bundle_with_gemini(user_input: dict[str, Any], *, use_schema: bool 
     merged = seo_bundle.merge_bundle_with_normalized_input(parsed, inp)
 
     seo_bundle.ensure_bundle_skeleton(merged)
+    # Канонічний опис = формат колишнього telegram-пакета (подобається більше).
+    seo_bundle.prefer_human_package_as_youtube_description(merged)
     seo_bundle.ensure_publish_standard_blocks(merged, inp)
     for w in seo_bundle.validate_bundle_warnings(merged):
         log.warning("bundle validation: %s", w)

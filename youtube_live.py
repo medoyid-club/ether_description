@@ -6,6 +6,7 @@
 Налаштування, що задаються кодом / змінними середовища (перекривають бандл де вказано):
 - приватність за замовчуванням `unlisted`, або `YOUTUBE_LIVE_PRIVACY_OVERRIDE`;
 - категорія відео `YOUTUBE_LIVE_CATEGORY_ID` (Entertainment = 24);
+- latency: `ultraLow`, `enableAutoStart`/`enableAutoStop` = false;
 - RTMP (`liveStreams`): зазвичай створюємо новий потік через `liveStreams.insert` і отримуємо ingestion URL + stream key із відповіді API.
 - Опціонально `stream_key.txt` (або шлях `YOUTUBE_STREAM_KEY_FILE`) може містити один або кілька ключів (по одному рядку, порядок = пріоритет).
   Тоді викликається `liveStreams.list` лише щоб підібрати відповідний `liveStream.id` і перевикористати його. Якщо list падає
@@ -386,10 +387,10 @@ def create_scheduled_broadcast(
             "enableDvr": True,
             "recordFromStart": True,
             "projection": "rectangular",
-            "enableLowLatency": False,
-            "latencyPreference": "normal",
-            "enableAutoStart": True,
-            "enableAutoStop": True,
+            "enableLowLatency": True,
+            "latencyPreference": "ultraLow",
+            "enableAutoStart": False,
+            "enableAutoStop": False,
             "closedCaptionsType": "closedCaptionsDisabled",
         },
     }

@@ -69,10 +69,11 @@ CONTENT_STATE = 1
 LANGUAGE_STATE = 2
 SPEAKERS_STATE = 3
 STYLE_STATE = 4
-TIME_STATE = 5
-PLAYLISTS_STATE = 6
-SEO_REVIEW_STATE = 7
-COVER_STATE = 8
+DATE_STATE = 5
+TIME_STATE = 6
+PLAYLISTS_STATE = 7
+SEO_REVIEW_STATE = 8
+COVER_STATE = 9
 
 TIMESTAMP_STATE_WAIT_URL = 101
 TIMESTAMP_STATE_CONFIRM = 102
@@ -96,12 +97,11 @@ STYLE_LABELS: dict[str, str] = dict(STYLE_CHOICES)
 TIMEZONE_CANONICAL = "Europe/Kyiv"
 KYIV_TZ = ZoneInfo(TIMEZONE_CANONICAL)
 
-TIME_PRESETS: tuple[tuple[str, str], ...] = (
-    ("today_18", "Сьогодні 18:00"),
-    ("today_21", "Сьогодні 21:00"),
-    ("tomorrow_18", "Завтра 18:00"),
-    ("tomorrow_21", "Завтра 21:00"),
-)
+_WD_UK_SHORT = ("пн", "вт", "ср", "чт", "пт", "сб", "нд")
+DATE_PICK_DAYS = 7  # сьогодні + 6 наступних
+ETHER_TIME_HOUR_START = 16
+ETHER_TIME_HOUR_END = 23  # включно з 23:00 та 23:30
+
 
 # PTB обробляє кожну групу окремо: після ConversationHandler (група 0) все одно викликається
 # MessageHandler у групі 1. Позначаємо update_id, щоб nudge не дублював відповідь після прийому чернетки.
@@ -168,35 +168,46 @@ def style_choice_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def date_choice_keyboard() -> InlineKeyboardMarkup:
+    """Кнопки дати: сьогодні + наступні 6 днів (Europe/Kyiv)."""
+    today = _now_kyiv().date()
+    rows: list[list[InlineKeyboardButton]] = []
+    for offset in range(DATE_PICK_DAYS):
+        d = today + timedelta(days=offset)
+        if offset == 0:
+            label = f"Сьогодні {d.strftime('%d.%m')}"
+        elif offset == 1:
+            label = f"Завтра {d.strftime('%d.%m')}"
+        else:
+            label = f"{_WD_UK_SHORT[d.weekday()]} {d.strftime('%d.%m')}"
+        rows.append(
+            [InlineKeyboardButton(label, callback_data=f"date:d:{offset}")]
+        )
+    return InlineKeyboardMarkup(rows)
+
+
+def _ether_time_slots() -> list[tuple[int, int]]:
+    """16:00 … 23:30 з кроком 30 хв."""
+    slots: list[tuple[int, int]] = []
+    for h in range(ETHER_TIME_HOUR_START, ETHER_TIME_HOUR_END + 1):
+        slots.append((h, 0))
+        slots.append((h, 30))
+    return slots
+
+
 def time_choice_keyboard() -> InlineKeyboardMarkup:
-    """
-    Префікс callback трьома частинами: time:preset:<ключ>.
-    Обовʼязково лишається ручний ввід текстом під повідомленням.
-    """
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    TIME_PRESETS[0][1],
-                    callback_data=f"time:preset:{TIME_PRESETS[0][0]}",
-                ),
-                InlineKeyboardButton(
-                    TIME_PRESETS[1][1],
-                    callback_data=f"time:preset:{TIME_PRESETS[1][0]}",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    TIME_PRESETS[2][1],
-                    callback_data=f"time:preset:{TIME_PRESETS[2][0]}",
-                ),
-                InlineKeyboardButton(
-                    TIME_PRESETS[3][1],
-                    callback_data=f"time:preset:{TIME_PRESETS[3][0]}",
-                ),
-            ],
-        ]
-    )
+    """Кнопки часу ефіру (по дві в рядку)."""
+    slots = _ether_time_slots()
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(slots), 2):
+        row: list[InlineKeyboardButton] = []
+        for h, m in slots[i : i + 2]:
+            label = f"{h:02d}:{m:02d}"
+            row.append(
+                InlineKeyboardButton(label, callback_data=f"time:hm:{h:02d}{m:02d}")
+            )
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
 
 
 def playlists_choice_keyboard(
@@ -224,7 +235,7 @@ def playlists_choice_keyboard(
 
 def seo_review_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("✅ Прийняти текст пакета", callback_data="seo:accept")]]
+        [[InlineKeyboardButton("✅ Прийняти опис YouTube", callback_data="seo:accept")]]
     )
 
 
@@ -292,26 +303,25 @@ async def _send_seo_generated_messages(
     bundle: dict,
 ) -> None:
     seo_bundle.ensure_bundle_skeleton(bundle)
+    seo_bundle.prefer_human_package_as_youtube_description(bundle)
 
     chunk_cap = min(3900, MessageLimit.MAX_TEXT_LENGTH - 64)
-    title, desc_prev = _youtube_preview_from_bundle(bundle, desc_max=900)
+    yt = bundle.get("youtube") if isinstance(bundle.get("youtube"), dict) else {}
+    title = str(yt.get("title") or "").strip() or "—"
+    full_desc = str(yt.get("description") or "").strip()
+    chunks = _split_long_telegram_text(full_desc, max_chunk=chunk_cap)
 
     header = (
         "Gemini: SEO зібрано (одне звернення до API за сесію /new).\n\n"
-        f"YouTube заголовок:\n{title}\n\n"
-        f"YouTube опис (початок):\n{desc_prev}\n"
+        f"YouTube заголовок:\n{title}\n"
     )
-    tg = bundle.get("telegram") if isinstance(bundle.get("telegram"), dict) else {}
-    full_plain = str(tg.get("full_package_plain") or "").strip()
-    chunks = _split_long_telegram_text(full_plain, max_chunk=chunk_cap)
-
     await bot.send_message(chat_id=chat_id, text=header, **reply_kw)
 
     if not chunks:
         await bot.send_message(
             chat_id=chat_id,
             text=(
-                "⚠️ Модель не повернула `telegram.full_package_plain`. Можете надіслати текст пакета вручну "
+                "⚠️ Модель не повернула YouTube-опис. Можете надіслати текст опису вручну "
                 "одним повідомленням або /cancel і /new."
             ),
             **reply_kw,
@@ -319,16 +329,16 @@ async def _send_seo_generated_messages(
     else:
         nch = len(chunks)
         for i, chunk in enumerate(chunks, start=1):
-            prefix = f"Текст пакета Telegram ({i}/{nch})\n\n" if nch > 1 else "Текст пакета Telegram\n\n"
+            prefix = f"Опис YouTube ({i}/{nch})\n\n" if nch > 1 else "Опис YouTube\n\n"
             await bot.send_message(chat_id=chat_id, text=prefix + chunk, **reply_kw)
 
     await bot.send_message(
         chat_id=chat_id,
         text=(
-            "Перевірте текст вище.\n"
-            "• Натисніть «Прийняти текст пакета» — перейдемо до етапу 7 (заставка).\n"
-            "• Або одним повідомленням надішліть виправлений текст для Telegram "
-            "(замість поточного `full_package_plain` у збереженому бандлі)."
+            "Перевірте опис вище.\n"
+            "• Натисніть «Прийняти опис YouTube» — перейдемо до етапу 7 (заставка).\n"
+            "• Або одним повідомленням надішліть виправлений опис "
+            "(замість поточного `youtube.description` у збереженому бандлі)."
         ),
         reply_markup=seo_review_keyboard(),
         **reply_kw,
@@ -404,25 +414,17 @@ def _combine_kyiv(day: date, hour: int, minute: int = 0) -> datetime:
     return datetime(day.year, day.month, day.day, hour, minute, tzinfo=KYIV_TZ)
 
 
-def _preset_start_datetime(preset_key: str) -> datetime | None:
-    mapping = dict(TIME_PRESETS)
-    if preset_key not in mapping:
+def _parse_time_hm_callback(token: str) -> tuple[int, int] | None:
+    """Парсить '1630' / '2300' з callback time:hm:HHMM."""
+    s = (token or "").strip()
+    if len(s) != 4 or not s.isdigit():
         return None
-    today = _now_kyiv().astimezone(KYIV_TZ).date()
-    tomorrow = today + timedelta(days=1)
-    if preset_key.startswith("today_"):
-        d = today
-        suf = preset_key[len("today_") :]
-    elif preset_key.startswith("tomorrow_"):
-        d = tomorrow
-        suf = preset_key[len("tomorrow_") :]
-    else:
+    h, m = int(s[:2]), int(s[2:])
+    if not (0 <= h <= 23 and m in (0, 30)):
         return None
-    if suf == "18":
-        return _combine_kyiv(d, 18, 0)
-    if suf == "21":
-        return _combine_kyiv(d, 21, 0)
-    return None
+    if (h, m) not in _ether_time_slots():
+        return None
+    return h, m
 
 
 def _parse_manual_start_time(text: str) -> datetime | None:
@@ -441,7 +443,7 @@ def _parse_manual_start_time(text: str) -> datetime | None:
     return None
 
 
-async def _clear_time_prompt_keyboard(
+async def _clear_prompt_keyboard(
     bot: object,
     chat_id: int | None,
     message_id: int | None,
@@ -453,6 +455,28 @@ async def _clear_time_prompt_keyboard(
         await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=empty)
     except Exception:
         pass
+
+
+async def _present_time_step(
+    anchor: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    day: date,
+) -> int:
+    context.user_data["scheduled_date"] = day.isoformat()
+    context.user_data[WIZARD_STEP_KEY] = "await_time"
+    readable_day = day.strftime("%d.%m.%Y")
+    wd = _WD_UK_SHORT[day.weekday()]
+    time_msg = await anchor.reply_text(
+        f"Етап 5б: час старту ефіру ({wd} {readable_day}, Europe/Kyiv).\n\n"
+        "Оберіть годину кнопкою або надішліть повну дату текстом:\n"
+        "• 15.06.2026 19:45\n"
+        "• 2026-06-15 19:45",
+        reply_markup=time_choice_keyboard(),
+    )
+    context.user_data["_time_prompt_chat_id"] = time_msg.chat_id
+    context.user_data["_time_prompt_msg_id"] = time_msg.message_id
+    return TIME_STATE
 
 
 async def finalize_scheduled_time(
@@ -467,7 +491,7 @@ async def finalize_scheduled_time(
     if dt_a <= now:
         hint = (
             "Цей момент часу уже минув (за Києвом). "
-            "Оберіть іншу опцію кнопкою або відправте дату у майбутньому, "
+            "Оберіть іншу дату/час кнопками або відправте дату у майбутньому, "
             "наприклад 15.06.2026 19:30"
         )
         if via_callback_query and update.callback_query:
@@ -483,9 +507,12 @@ async def finalize_scheduled_time(
 
     context.user_data["timezone"] = TIMEZONE_CANONICAL
     context.user_data["scheduled_start_time"] = iso
+    context.user_data.pop("scheduled_date", None)
     context.user_data.pop(WIZARD_STEP_KEY, None)
     mid = context.user_data.pop("_time_prompt_msg_id", None)
     cid = context.user_data.pop("_time_prompt_chat_id", None)
+    context.user_data.pop("_date_prompt_msg_id", None)
+    context.user_data.pop("_date_prompt_chat_id", None)
 
     log.info(
         "Задано початок ефіру %s (%s), user=%s",
@@ -508,7 +535,7 @@ async def finalize_scheduled_time(
         await update.callback_query.edit_message_text(summary, reply_markup=cleared)
         anchor_msg = update.callback_query.message
     else:
-        await _clear_time_prompt_keyboard(context.bot, cid, mid)
+        await _clear_prompt_keyboard(context.bot, cid, mid)
         if update.message:
             anchor_msg = update.message
             await update.message.reply_text(summary)
@@ -748,10 +775,81 @@ async def refuse_document_in_style_step(
     return STYLE_STATE
 
 
+async def cmd_start_in_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.message:
+        await update.message.reply_text(
+            "Зараз оберіть дату ефіру кнопкою (найближчі 7 днів) або /cancel.",
+        )
+    return DATE_STATE
+
+
+async def cmd_help_waiting_date(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if update.message:
+        await update.message.reply_text(
+            "Етап 5а — дата старту ефіру (Europe/Kyiv).\n\n"
+            "Оберіть один із найближчих 7 днів кнопкою під повідомленням бота.\n"
+            "/cancel — почати заново з /new."
+        )
+    return DATE_STATE
+
+
+async def refuse_text_in_date_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if update.message:
+        await update.message.reply_text(
+            "На цьому кроці оберіть дату кнопкою або /cancel. "
+            "Повну дату з часом можна ввести текстом уже на наступному кроці."
+        )
+    return DATE_STATE
+
+
+async def refuse_document_in_date_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    if update.message:
+        await update.message.reply_text(
+            "Файл не потрібен — лише кнопка дати або /cancel."
+        )
+    return DATE_STATE
+
+
+async def receive_date_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    q = update.callback_query
+    if not q or not q.data:
+        return DATE_STATE
+    parts = q.data.split(":")
+    if len(parts) != 3 or parts[0] != "date" or parts[1] != "d":
+        await q.answer()
+        return DATE_STATE
+    try:
+        offset = int(parts[2])
+    except ValueError:
+        await q.answer(text="Невідома дата", show_alert=True)
+        return DATE_STATE
+    if offset < 0 or offset >= DATE_PICK_DAYS:
+        await q.answer(text="Невідома дата", show_alert=True)
+        return DATE_STATE
+
+    day = _now_kyiv().date() + timedelta(days=offset)
+    await q.answer()
+    readable = day.strftime("%d.%m.%Y")
+    wd = _WD_UK_SHORT[day.weekday()]
+    await q.edit_message_text(
+        f"Етап 5а ✓ Дата ефіру: {wd} {readable} (Europe/Kyiv)",
+        reply_markup=InlineKeyboardMarkup([]),
+    )
+    if not q.message:
+        return ConversationHandler.END
+    return await _present_time_step(q.message, context, day=day)
+
+
 async def cmd_start_in_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.message:
         await update.message.reply_text(
-            "Зараз вкажіть час початку ефіру: кнопки для швидкого вибору або "
+            "Зараз вкажіть час початку ефіру: кнопки 16:00–23:30 або "
             "текстом у форматі ДД.ММ.РРРР ГГ:ХХ (завжди за Києвом). /cancel щоб скинути.",
         )
     return TIME_STATE
@@ -762,9 +860,9 @@ async def cmd_help_waiting_time(
 ) -> int:
     if update.message:
         await update.message.reply_text(
-            "Етап 5 — час старту ефіру.\n\n"
+            "Етап 5б — час старту ефіру.\n\n"
             "Часова зона завжди Europe/Kyiv (київський час).\n"
-            "Є швидкі кнопки (сьогодні/завтра 18:00 та 21:00) або введіть дату текстом:\n"
+            "Кнопки: з 16:00 до 23:30 з кроком 30 хв, або введіть дату текстом:\n"
             "15.06.2026 19:45 або 2026-06-15 19:45.\n\n"
             "/cancel — почати заново з /new."
         )
@@ -776,28 +874,44 @@ async def refuse_document_in_time_step(
 ) -> int:
     if update.message:
         await update.message.reply_text(
-            "Файл не потрібен — лише кнопки або дата текстом форматом ДД.ММ.РРРР ГГ:ХХ, /cancel."
+            "Файл не потрібен — лише кнопки часу або дата текстом форматом ДД.ММ.РРРР ГГ:ХХ, /cancel."
         )
     return TIME_STATE
 
 
-async def receive_time_preset_callback(
+async def receive_time_hm_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     q = update.callback_query
     if not q or not q.data:
         return TIME_STATE
     parts = q.data.split(":")
-    if len(parts) != 3 or parts[0] != "time" or parts[1] != "preset":
+    if len(parts) != 3 or parts[0] != "time" or parts[1] != "hm":
         await q.answer()
         return TIME_STATE
 
-    preset_key = parts[2]
-    dt = _preset_start_datetime(preset_key)
-    if dt is None:
-        await q.answer(text="Невідомий пресет", show_alert=True)
+    parsed = _parse_time_hm_callback(parts[2])
+    if parsed is None:
+        await q.answer(text="Невідомий час", show_alert=True)
+        return TIME_STATE
+    hour, minute = parsed
+
+    raw_day = context.user_data.get("scheduled_date")
+    if isinstance(raw_day, str) and raw_day.strip():
+        try:
+            day = date.fromisoformat(raw_day.strip())
+        except ValueError:
+            day = None
+    else:
+        day = None
+    if day is None:
+        await q.answer(
+            text="Спочатку оберіть дату (крок 5а). /cancel і /new.",
+            show_alert=True,
+        )
         return TIME_STATE
 
+    dt = _combine_kyiv(day, hour, minute)
     return await finalize_scheduled_time(
         update, context, dt, via_callback_query=True
     )
@@ -817,7 +931,7 @@ async def receive_time_manual_text(
             "Час завжди за Києвом (Europe/Kyiv). Формат, наприклад:\n"
             "• 15.06.2026 19:45\n"
             "• 2026-06-15 19:45\n\n"
-            "Або скористайтесь швидкими кнопками у попередньому повідомленні бота."
+            "Або скористайтесь кнопками часу у попередньому повідомленні бота."
         )
         return TIME_STATE
 
@@ -963,7 +1077,7 @@ async def cmd_start_in_seo_review(
 ) -> int:
     if update.message:
         await update.message.reply_text(
-            "Зараз переглядаєте згенерований текст. Натисніть «Прийняти текст пакета» під повідомленням "
+            "Зараз переглядаєте згенерований опис YouTube. Натисніть «Прийняти опис YouTube» під повідомленням "
             "з кнопкою або надішліть виправлення одним текстовим повідомленням. /cancel — скасувати."
         )
     return SEO_REVIEW_STATE
@@ -974,8 +1088,8 @@ async def cmd_help_waiting_seo_review(
 ) -> int:
     if update.message:
         await update.message.reply_text(
-            "Після Gemini: один текст згенеровано.\n\n"
-            "«Прийняти текст пакета» або надішліть повний замінений текст для Telegram-пакета одним повідомленням. "
+            "Після Gemini: один YouTube-опис згенеровано.\n\n"
+            "«Прийняти опис YouTube» або надішліть повний замінений текст опису одним повідомленням. "
             "Файли на цьому кроці не потрібні. /cancel — скасувати."
         )
     return SEO_REVIEW_STATE
@@ -986,7 +1100,7 @@ async def refuse_document_in_seo_review_step(
 ) -> int:
     if update.message:
         await update.message.reply_text(
-            "На кроці перегляду надішліть лише текст правок або натисніть «Прийняти текст пакета». /cancel — скасувати."
+            "На кроці перегляду надішліть лише текст правок або натисніть «Прийняти опис YouTube». /cancel — скасувати."
         )
     return SEO_REVIEW_STATE
 
@@ -1040,7 +1154,7 @@ async def receive_seo_review_edit_text(
     txt = update.message.text.strip()
     if not txt:
         await update.message.reply_text(
-            "Надішліть повний текст пакета одним повідомленням або натисніть «Прийняти текст пакета», якщо правок не потрібно.",
+            "Надішліть повний опис YouTube одним повідомленням або натисніть «Прийняти опис YouTube», якщо правок не потрібно.",
         )
         return SEO_REVIEW_STATE
     ud = context.user_data
@@ -1051,15 +1165,21 @@ async def receive_seo_review_edit_text(
         )
         return SEO_REVIEW_STATE
     seo_bundle.ensure_bundle_skeleton(b)
-    tg = b.setdefault("telegram", {})
-    if not isinstance(tg, dict):
-        b["telegram"] = {"full_package_plain": txt}
+    yt = b.setdefault("youtube", {})
+    if not isinstance(yt, dict):
+        b["youtube"] = {"description": txt}
+        yt = b["youtube"]
     else:
+        yt["description"] = txt
+    tg = b.setdefault("telegram", {})
+    if isinstance(tg, dict):
         tg["full_package_plain"] = txt
+    else:
+        b["telegram"] = {"full_package_plain": txt}
 
     rk = _message_reply_kwargs(update.message)
     await update.message.reply_text(
-        "Текст пакета для Telegram збережено з вашими правками.\nНатисніть «Прийняти текст пакета», коли все готово.",
+        "Опис YouTube збережено з вашими правками.\nНатисніть «Прийняти опис YouTube», коли все готово.",
         reply_markup=seo_review_keyboard(),
         **rk,
     )
@@ -1611,22 +1731,19 @@ async def receive_style_choice(update: Update, context: ContextTypes.DEFAULT_TYP
     cleared = InlineKeyboardMarkup([])
     await q.edit_message_text(
         f"Етап 4 ✓ Стиль: {label}\n\n"
-        "Далі — час старту ефіру (Europe/Kyiv, наступне повідомлення).",
+        "Далі — дата і час старту ефіру (Europe/Kyiv).",
         reply_markup=cleared,
     )
 
-    context.user_data[WIZARD_STEP_KEY] = "await_time"
-    time_msg = await q.message.reply_text(
-        "Етап 5: коли стартує ефір? Часова зона завжди Київ — Europe/Kyiv.\n\n"
-        "Натисніть швидку кнопку або надішліть дату текстом одним із форматів:\n"
-        "• 15.06.2026 19:45\n"
-        "• 2026-06-15 19:45",
-        reply_markup=time_choice_keyboard(),
+    context.user_data[WIZARD_STEP_KEY] = "await_date"
+    date_msg = await q.message.reply_text(
+        "Етап 5а: оберіть дату ефіру (найближчі 7 днів, Europe/Kyiv).",
+        reply_markup=date_choice_keyboard(),
     )
-    context.user_data["_time_prompt_chat_id"] = time_msg.chat_id
-    context.user_data["_time_prompt_msg_id"] = time_msg.message_id
+    context.user_data["_date_prompt_chat_id"] = date_msg.chat_id
+    context.user_data["_date_prompt_msg_id"] = date_msg.message_id
 
-    return TIME_STATE
+    return DATE_STATE
 
 
 def _timestamps_review_keyboard() -> InlineKeyboardMarkup:
@@ -1821,6 +1938,7 @@ async def nudge_use_new_before_draft(update: Update, context: ContextTypes.DEFAU
         "await_language",
         "await_speakers",
         "await_style",
+        "await_date",
         "await_time",
         "await_playlists",
         "await_seo_review",
@@ -1889,12 +2007,19 @@ def main() -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, refuse_text_in_style_step),
                 MessageHandler(filters.Document.ALL, refuse_document_in_style_step),
             ],
+            DATE_STATE: [
+                CommandHandler("start", cmd_start_in_date),
+                CommandHandler("help", cmd_help_waiting_date),
+                CallbackQueryHandler(receive_date_choice, pattern=r"^date:d:[0-6]$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, refuse_text_in_date_step),
+                MessageHandler(filters.Document.ALL, refuse_document_in_date_step),
+            ],
             TIME_STATE: [
                 CommandHandler("start", cmd_start_in_time),
                 CommandHandler("help", cmd_help_waiting_time),
                 CallbackQueryHandler(
-                    receive_time_preset_callback,
-                    pattern=r"^time:preset:(today_18|today_21|tomorrow_18|tomorrow_21)$",
+                    receive_time_hm_callback,
+                    pattern=r"^time:hm:\d{4}$",
                 ),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_time_manual_text),
                 MessageHandler(filters.Document.ALL, refuse_document_in_time_step),

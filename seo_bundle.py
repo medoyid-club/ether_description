@@ -19,10 +19,21 @@ YOUTUBE_DESCRIPTION_MAX_CHARS = 5000
 # Документація згадує верхню межу кількості тегів; обмежуємо розумно для моделі.
 YOUTUBE_TAGS_SOFT_MAX = 100
 
-# Фіксований хвіст опису (YouTube та дзеркально telegram.full_package_plain).
+# Фіксований хвіст опису (YouTube; telegram.full_package_plain дзеркалить description).
 _PUBLISH_SUPPORT_FOOTER_LINES = """--------------------------------------
 Підтримайте нас: Patreon: https://www.patreon.com/c/honey_erbe
-Зворотний зв'язок: honey.erbe@gmail.com"""
+Telegram: https://t.me/MedoyidClub
+Web: https://www.medoyid-club.com"""
+
+# Старі варіанти футера — знімаємо при ідемпотентному оновленні.
+_LEGACY_PUBLISH_SUPPORT_FOOTERS = (
+    """--------------------------------------
+Підтримайте нас: Patreon: https://www.patreon.com/c/honey_erbe
+Зворотний зв'язок: honey.erbe@gmail.com""",
+    """--------------------------------------
+Підтримайте нас: Patreon: https://www.patreon.com/c/honey_erbe
+Зворотний звʼязок: honey.erbe@gmail.com""",
+)
 
 _TELEGRAM_FULL_PACKAGE_SAFE = 4085
 
@@ -140,21 +151,28 @@ def _url_in_aggregate_text(blob: str, url: str) -> bool:
     return False
 
 
-def _strip_publish_automation_suffix(text: str) -> str:
-    """Прибирає раніше автододані блоки (каталог + фіксований підтримка/фідбек)."""
+def _strip_one_footer(text: str, footer: str) -> str:
     t = text.rstrip()
-    suf = "\n\n" + _PUBLISH_SUPPORT_FOOTER_LINES
+    suf = "\n\n" + footer
     changed = True
     while changed:
         changed = False
-        if t.endswith(_PUBLISH_SUPPORT_FOOTER_LINES):
-            t = t[: -len(_PUBLISH_SUPPORT_FOOTER_LINES)].rstrip()
+        if t.endswith(footer):
+            t = t[: -len(footer)].rstrip()
             changed = True
             continue
         if t.endswith(suf):
             t = t[: -len(suf)].rstrip()
             changed = True
             continue
+    return t
+
+
+def _strip_publish_automation_suffix(text: str) -> str:
+    """Прибирає раніше автододані блоки (каталог + фіксований футер підтримки)."""
+    t = text.rstrip()
+    for footer in (_PUBLISH_SUPPORT_FOOTER_LINES, *_LEGACY_PUBLISH_SUPPORT_FOOTERS):
+        t = _strip_one_footer(t, footer)
 
     intro = "\n\nДодаткові посилання з каталогу спікерів:\n\n"
     j = t.rfind(intro)
@@ -167,6 +185,29 @@ def _strip_publish_automation_suffix(text: str) -> str:
         t = t[:j2].rstrip()
 
     return t
+
+
+def prefer_human_package_as_youtube_description(bundle: dict[str, Any]) -> None:
+    """
+    Єдиний публічний опис = колишній «телеграм-пакунок» (формат, який ми залишаємо).
+    Якщо telegram.full_package_plain непорожній — він стає youtube.description;
+    інакше description копіюється в telegram для дзеркала схеми.
+    """
+    ensure_bundle_skeleton(bundle)
+    yt = bundle["youtube"]
+    tg = bundle.setdefault("telegram", {})
+    if not isinstance(tg, dict):
+        bundle["telegram"] = {"full_package_plain": ""}
+        tg = bundle["telegram"]
+
+    plain = str(tg.get("full_package_plain") or "").strip()
+    desc = str(yt.get("description") or "").strip()
+    if plain:
+        yt["description"] = plain
+        tg["full_package_plain"] = plain
+    elif desc:
+        tg["full_package_plain"] = desc
+        yt["description"] = desc
 
 
 def _format_catalog_missing_links(
@@ -217,9 +258,11 @@ def _truncate_core_preserving_footer(core: str, room: int) -> str:
 def ensure_publish_standard_blocks(bundle: dict[str, Any], inp: dict[str, Any]) -> None:
     """
     Додає згадані в USER_INPUT, але відсутні в тексті посилання з каталогу спікерів
-    і фіксований футер Patreon / e-mail. Ідемпотентно (старий автоматичний хвіст знімається).
+    і фіксований футер Patreon / Telegram / Web. Ідемпотентно (старий хвіст знімається).
+    youtube.description — канон; telegram.full_package_plain дзеркалить його.
     """
     ensure_bundle_skeleton(bundle)
+    prefer_human_package_as_youtube_description(bundle)
     nin = normalize_generation_input(inp)
     lim = nin.get("youtube_limits") or {}
     dmax = int(lim.get("description_max") or YOUTUBE_DESCRIPTION_MAX_CHARS)
@@ -228,11 +271,8 @@ def ensure_publish_standard_blocks(bundle: dict[str, Any], inp: dict[str, Any]) 
     tg = bundle.setdefault("telegram", {})
 
     yt_core = _strip_publish_automation_suffix(str(yt.get("description") or ""))
-    tg_core = _strip_publish_automation_suffix(
-        str(tg.get("full_package_plain") or "") if isinstance(tg, dict) else ""
-    )
 
-    gap_lines = _format_catalog_missing_links(nin, yt_core, tg_core)
+    gap_lines = _format_catalog_missing_links(nin, yt_core, yt_core)
 
     gap_intro = ""
     if gap_lines.strip():
@@ -247,12 +287,11 @@ def ensure_publish_standard_blocks(bundle: dict[str, Any], inp: dict[str, Any]) 
     suffix_len = len(suffix_join)
     yt_room = max(0, dmax - suffix_len - 2)
     new_yt_body = _truncate_core_preserving_footer(yt_core, yt_room)
-    yt["description"] = (new_yt_body + suffix_join).strip()
-
-    tg_room = max(0, _TELEGRAM_FULL_PACKAGE_SAFE - suffix_len - 2)
-    new_tg_body = _truncate_core_preserving_footer(tg_core, tg_room)
+    final_desc = (new_yt_body + suffix_join).strip()
+    yt["description"] = final_desc
     if isinstance(tg, dict):
-        tg["full_package_plain"] = (new_tg_body + suffix_join).strip()
+        tg_room = max(0, _TELEGRAM_FULL_PACKAGE_SAFE - suffix_len - 2)
+        tg["full_package_plain"] = _truncate_core_preserving_footer(final_desc, tg_room)
 
 
 def _strip_markdown_fences(text: str) -> str:
@@ -407,7 +446,7 @@ def apply_youtube_hard_limits(
     if isinstance(tags, list):
         cleaned: list[str] = []
         for t in tags:
-            s = str(t).strip()
+            s = str(t).strip().lstrip("#").strip()
             if s and s not in cleaned:
                 cleaned.append(s)
             if len(cleaned) >= tagmax:
