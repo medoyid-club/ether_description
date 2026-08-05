@@ -45,6 +45,21 @@ SPEAKER_SOCIAL_LABELS_UK: dict[str, str] = {
 }
 
 
+def _looks_like_email(raw: str) -> bool:
+    """Поштовий ящик (не URL): local@domain.tld без шляху/схеми."""
+    s = (raw or "").strip()
+    if not s or "@" not in s or any(ch.isspace() for ch in s):
+        return False
+    if "://" in s or "/" in s:
+        return False
+    local, _, domain = s.partition("@")
+    if not local or not domain or "." not in domain:
+        return False
+    if domain.startswith(".") or domain.endswith("."):
+        return False
+    return True
+
+
 def _normalize_url(cell: str) -> str | None:
     raw = (cell or "").strip()
     if not raw:
@@ -52,7 +67,14 @@ def _normalize_url(cell: str) -> str | None:
     low = raw.lower()
     if low in ("email", "n/a", "-", "—"):
         return None
+    # PayPal / контакти інколи дають просто email — не чіпай префіксом https://
+    if _looks_like_email(raw):
+        return raw
     if raw.startswith("http://") or raw.startswith("https://"):
+        # помилково зліплений https://email@domain → лишаємо email
+        rest = raw.split("://", 1)[1]
+        if _looks_like_email(rest):
+            return rest
         return raw
     # рядки на кшталт youtube.com/... або www....
     if "." in raw or "/" in raw:

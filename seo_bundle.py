@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -210,40 +211,94 @@ def prefer_human_package_as_youtube_description(bundle: dict[str, Any]) -> None:
         yt["description"] = desc
 
 
-def _format_catalog_missing_links(
-    inp: dict[str, Any], youtube_core: str, telegram_core: str
-) -> str:
-    """Посилання з speakers (каталогу), яких немає ані в YouTube-описі, ані в Telegram-пакеті."""
-    blob = (youtube_core or "") + "\n" + (telegram_core or "")
-    lines_all: list[str] = []
+_HTTPS_PREFIXED_EMAIL_RE = re.compile(
+    r"https?://([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b"
+)
 
-    speakers = inp.get("speakers")
-    if not isinstance(speakers, list):
-        return ""
 
-    order = speakers_catalog.SPEAKER_SOCIAL_KEY_ORDER
+def _fix_https_prefixed_emails(text: str) -> str:
+    """Прибирає помилковий https:// перед email (PayPal тощо)."""
+    return _HTTPS_PREFIXED_EMAIL_RE.sub(r"\1", text or "")
+
+
+def _plain_speaker_name(display_name: str) -> str:
+    """Ім'я без emoji/символів — для пошуку блоку в описі."""
+    parts = [
+        ch if (ch.isalpha() or ch in " '-’`.") else " " for ch in (display_name or "")
+    ]
+    return " ".join("".join(parts).split())
+
+
+def _missing_social_lines(sp: dict[str, Any], blob: str) -> list[str]:
+    soc = sp.get("social")
+    if not isinstance(soc, dict):
+        return []
     labels = speakers_catalog.SPEAKER_SOCIAL_LABELS_UK
+    out: list[str] = []
+    for key in speakers_catalog.SPEAKER_SOCIAL_KEY_ORDER:
+        val = soc.get(key)
+        if not isinstance(val, str) or not val.strip():
+            continue
+        u = val.strip()
+        if not _url_in_aggregate_text(blob, u):
+            out.append(f"{labels.get(key, key)}: {u}")
+    return out
 
+
+def _inject_missing_catalog_links(text: str, inp: dict[str, Any]) -> str:
+    """
+    Дописує відсутні посилання з speakers.csv у вже наявний блок спікера.
+    Без окремого заголовка «Додаткові посилання…».
+    """
+    speakers = inp.get("speakers")
+    if not isinstance(speakers, list) or not text:
+        return text
+
+    result = text
     for sp in speakers:
         if not isinstance(sp, dict):
             continue
         name = str(sp.get("display_name") or "").strip()
-        soc = sp.get("social")
-        if not isinstance(soc, dict):
+        plain = _plain_speaker_name(name)
+        if not plain:
             continue
-        miss_lines: list[str] = []
-        for key in order:
-            val = soc.get(key)
-            if not isinstance(val, str) or not val.strip():
-                continue
-            u = val.strip()
-            if not _url_in_aggregate_text(blob, u):
-                miss_lines.append(f"• {labels.get(key, key)}: {u}")
-        if miss_lines:
-            lines_all.append(name)
-            lines_all.extend(miss_lines)
+        miss = _missing_social_lines(sp, result)
+        if not miss:
+            continue
 
-    return "\n".join(lines_all)
+        lines = result.splitlines()
+        name_idx = -1
+        plain_lo = plain.lower()
+        for i, line in enumerate(lines):
+            if plain_lo in line.lower():
+                name_idx = i
+        if name_idx < 0:
+            # Блоку немає — додаємо один звичайний блок спікера в кінці (перед футером).
+            block = name + ":\n" + "\n".join(miss)
+            result = (result.rstrip() + "\n\n" + block).strip()
+            continue
+
+        # Кінець блоку: до розділювача / порожнього рядка перед наступним спікером / кінця.
+        end = name_idx + 1
+        while end < len(lines):
+            ln = lines[end].strip()
+            if ln.startswith("---") or set(ln) == {"-"} and len(ln) >= 10:
+                break
+            if not ln and end + 1 < len(lines):
+                nxt = lines[end + 1].strip()
+                # наступний блок спікера або хештеги
+                if nxt.startswith("#") or (nxt.endswith(":") and "http" not in nxt.lower()):
+                    break
+            end += 1
+
+        insert_at = end
+        # Вставляємо після останнього непорожнього рядка блоку.
+        while insert_at > name_idx + 1 and not lines[insert_at - 1].strip():
+            insert_at -= 1
+        lines[insert_at:insert_at] = miss
+        result = "\n".join(lines)
+
+    return result
 
 
 def _truncate_core_preserving_footer(core: str, room: int) -> str:
@@ -257,8 +312,8 @@ def _truncate_core_preserving_footer(core: str, room: int) -> str:
 
 def ensure_publish_standard_blocks(bundle: dict[str, Any], inp: dict[str, Any]) -> None:
     """
-    Додає згадані в USER_INPUT, але відсутні в тексті посилання з каталогу спікерів
-    і фіксований футер Patreon / Telegram / Web. Ідемпотентно (старий хвіст знімається).
+    Підтягує відсутні посилання з каталогу спікерів у блоки спікерів (без окремої секції),
+    виправляє https:// перед email і додає фіксований футер. Ідемпотентно.
     youtube.description — канон; telegram.full_package_plain дзеркалить його.
     """
     ensure_bundle_skeleton(bundle)
@@ -271,23 +326,14 @@ def ensure_publish_standard_blocks(bundle: dict[str, Any], inp: dict[str, Any]) 
     tg = bundle.setdefault("telegram", {})
 
     yt_core = _strip_publish_automation_suffix(str(yt.get("description") or ""))
+    yt_core = _fix_https_prefixed_emails(yt_core)
+    yt_core = _inject_missing_catalog_links(yt_core, nin)
 
-    gap_lines = _format_catalog_missing_links(nin, yt_core, yt_core)
-
-    gap_intro = ""
-    if gap_lines.strip():
-        gap_intro = "\n\nДодаткові посилання з каталогу спікерів:\n\n" + gap_lines.strip()
-
-    suffix = (gap_intro + "\n\n" + _PUBLISH_SUPPORT_FOOTER_LINES).rstrip("\n")
-
-    suffix_join = ""
-    if suffix:
-        suffix_join = "\n\n" + suffix
-
-    suffix_len = len(suffix_join)
+    suffix = "\n\n" + _PUBLISH_SUPPORT_FOOTER_LINES
+    suffix_len = len(suffix)
     yt_room = max(0, dmax - suffix_len - 2)
     new_yt_body = _truncate_core_preserving_footer(yt_core, yt_room)
-    final_desc = (new_yt_body + suffix_join).strip()
+    final_desc = (new_yt_body + suffix).strip()
     yt["description"] = final_desc
     if isinstance(tg, dict):
         tg_room = max(0, _TELEGRAM_FULL_PACKAGE_SAFE - suffix_len - 2)
