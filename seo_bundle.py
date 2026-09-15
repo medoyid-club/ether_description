@@ -24,10 +24,16 @@ YOUTUBE_TAGS_SOFT_MAX = 100
 _PUBLISH_SUPPORT_FOOTER_LINES = """--------------------------------------
 Підтримайте нас: Patreon: https://www.patreon.com/c/honey_erbe
 Telegram: https://t.me/MedoyidClub
-Web: https://www.medoyid-club.com"""
+Web: https://www.medoyid-club.com
+Мерч: https://medoyid.com/futbolkimedoediv
+Радіо Медоїд: https://www.medoyid-club.com/uk/radio"""
 
 # Старі варіанти футера — знімаємо при ідемпотентному оновленні.
 _LEGACY_PUBLISH_SUPPORT_FOOTERS = (
+    """--------------------------------------
+Підтримайте нас: Patreon: https://www.patreon.com/c/honey_erbe
+Telegram: https://t.me/MedoyidClub
+Web: https://www.medoyid-club.com""",
     """--------------------------------------
 Підтримайте нас: Patreon: https://www.patreon.com/c/honey_erbe
 Зворотний зв'язок: honey.erbe@gmail.com""",
