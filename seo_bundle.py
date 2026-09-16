@@ -26,10 +26,17 @@ _PUBLISH_SUPPORT_FOOTER_LINES = """--------------------------------------
 Telegram: https://t.me/MedoyidClub
 Web: https://www.medoyid-club.com
 Мерч: https://medoyid.com/futbolkimedoediv
-Радіо Медоїд: https://www.medoyid-club.com/uk/radio"""
+Радіо Медоїд: https://www.medoyid-club.com/uk/radio
+Email: partners@medoyid-club.com"""
 
 # Старі варіанти футера — знімаємо при ідемпотентному оновленні.
 _LEGACY_PUBLISH_SUPPORT_FOOTERS = (
+    """--------------------------------------
+Підтримайте нас: Patreon: https://www.patreon.com/c/honey_erbe
+Telegram: https://t.me/MedoyidClub
+Web: https://www.medoyid-club.com
+Мерч: https://medoyid.com/futbolkimedoediv
+Радіо Медоїд: https://www.medoyid-club.com/uk/radio""",
     """--------------------------------------
 Підтримайте нас: Patreon: https://www.patreon.com/c/honey_erbe
 Telegram: https://t.me/MedoyidClub
