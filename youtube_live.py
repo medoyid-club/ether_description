@@ -89,7 +89,7 @@ def _pil_image_to_jpeg_bytes_under(im_rgb, max_bytes: int) -> bytes | None:
     return None
 
 
-def _prepare_thumbnail_for_youtube_upload(
+def prepare_thumbnail_for_youtube_upload(
     thumbnail_path: Path,
     session_dir: Path,
     warns: list[str],
@@ -545,7 +545,7 @@ def create_scheduled_broadcast(
         warns.append(w)
 
     if thumbnail_path and thumbnail_path.is_file():
-        thumb_for_api = _prepare_thumbnail_for_youtube_upload(thumbnail_path, session_dir, warns)
+        thumb_for_api = prepare_thumbnail_for_youtube_upload(thumbnail_path, session_dir, warns)
         if thumb_for_api is None:
             pass
         else:

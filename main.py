@@ -60,9 +60,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("ether_bot")
 
 MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024
-# Ліміт прийому заставки в Telegram; окремо YouTube `thumbnails.set` приймає не більш ~2 MiB —
-# там у `youtube_live` при потребі перекодування в JPEG.
+# Стеля прийому заставки з Telegram (getFile до ~20 МБ). YouTube thumbnails.set — ~2 МіБ;
+# більший файл одразу після завантаження перекодовується в JPEG.
 MAX_COVER_FILE_BYTES = 12 * 1024 * 1024
+COVER_DOWNLOAD_TIMEOUT_S = 120.0
 PREVIEW_LIMIT = 800
 
 CONTENT_STATE = 1
@@ -1138,6 +1139,7 @@ async def receive_seo_review_callback(
         text=(
             "Етап 7 — заставка ефіру.\n\n"
             "Надішліть зображення як фото або документом (JPEG, PNG, WebP).\n"
+            "Якщо файл більший за 2 МБ, бот одразу переведе його в JPEG перед YouTube.\n"
             "Або «Без заставки», якщо зараз нічого додавати не потрібно."
         ),
         reply_markup=cover_step_keyboard(),
@@ -1293,6 +1295,7 @@ async def _finalize_session_disk_and_youtube(
     session_output.dump_json(session_dir / "wizard_meta.json", _wizard_meta_snapshot(ud))
 
     thumb_path: Path | None = None
+    cover_notes: list[str] = []
     fid = ud.get("splash_file_id")
     if isinstance(fid, str) and fid.strip():
         fn = str(ud.get("splash_filename") or "")
@@ -1302,18 +1305,34 @@ async def _finalize_session_disk_and_youtube(
         splash_dest = session_dir / f"splash{suf}"
 
         try:
-            tg_file = await bot.get_file(fid)
-            blob = await tg_file.download_as_bytearray()
+            tg_file = await bot.get_file(fid, read_timeout=COVER_DOWNLOAD_TIMEOUT_S)
+            blob = await tg_file.download_as_bytearray(read_timeout=COVER_DOWNLOAD_TIMEOUT_S)
             splash_dest.write_bytes(bytes(blob))
             thumb_path = splash_dest
             session_output.dump_json(
                 session_dir / "splash_telegram.json",
-                {"file_id": fid.strip(), "kind": ud.get("splash_kind"), "filename": fn or None},
+                {
+                    "file_id": fid.strip(),
+                    "kind": ud.get("splash_kind"),
+                    "filename": fn or None,
+                    "bytes": splash_dest.stat().st_size,
+                },
             )
         except Exception as exc:
             log.warning("Завантаження заставки з Telegram не вдалося: %s", exc)
             session_output.dump_json(session_dir / "splash_download.error.json", {"error": str(exc)})
+            cover_notes.append(f"Заставку з Telegram не завантажено: {exc}")
             thumb_path = None
+
+        if thumb_path is not None and thumb_path.stat().st_size > youtube_live.YOUTUBE_THUMBNAIL_MAX_UPLOAD_BYTES:
+            await bot.send_chat_action(chat_id=chat.id, action=ChatAction.UPLOAD_PHOTO, **rk)
+            prepared = await asyncio.to_thread(
+                youtube_live.prepare_thumbnail_for_youtube_upload,
+                thumb_path,
+                session_dir,
+                cover_notes,
+            )
+            thumb_path = prepared if prepared is not None and prepared.is_file() else None
 
     await bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING, **rk)
 
@@ -1333,6 +1352,11 @@ async def _finalize_session_disk_and_youtube(
                 f"{session_dir.resolve()}\n\n"
                 "Створити трансляцію у YouTube не вдалося (деталі в логах / повідомленні нижче):\n\n"
                 f"{str(exc)[:3500]}"
+                + (
+                    "\n\nЗаставка:\n" + "\n".join(f"• {n}" for n in cover_notes)
+                    if cover_notes
+                    else ""
+                )
             ),
             **rk,
         )
@@ -1372,10 +1396,13 @@ async def _finalize_session_disk_and_youtube(
     )
 
     warns = live_result.get("warnings")
-    if isinstance(warns, list) and warns:
+    if not isinstance(warns, list):
+        warns = []
+    notes = [*cover_notes, *[str(w) for w in warns]]
+    if notes:
         msg_lines.append("")
         msg_lines.append("Увага (частину налаштувань YouTube могло відхилити API):")
-        for w in warns[:8]:
+        for w in notes[:8]:
             msg_lines.append("• " + str(w)[:900])
 
     text = "\n".join(msg_lines)
@@ -1436,6 +1463,12 @@ async def receive_cover_photo(
         (best.file_id[-8:] if best.file_id else ""),
     )
 
+    if best.file_size and best.file_size > youtube_live.YOUTUBE_THUMBNAIL_MAX_UPLOAD_BYTES:
+        await msg.reply_text(
+            "Заставку отримано. Файл більший за 2 МБ — конвертую в JPEG, потім створюю трансляцію.",
+            **rk,
+        )
+
     await _finalize_session_disk_and_youtube(update, context, reply_anchor=msg)
     return ConversationHandler.END
 
@@ -1473,10 +1506,17 @@ async def receive_cover_document(
     ud.pop(WIZARD_STEP_KEY, None)
 
     log.info(
-        "Заставка (document): user=%s mime=%s",
+        "Заставка (document): user=%s mime=%s bytes=%s",
         update.effective_user.id if update.effective_user else "?",
         doc.mime_type or "",
+        doc.file_size,
     )
+
+    if doc.file_size and doc.file_size > youtube_live.YOUTUBE_THUMBNAIL_MAX_UPLOAD_BYTES:
+        await msg.reply_text(
+            "Заставку отримано. Файл більший за 2 МБ — конвертую в JPEG, потім створюю трансляцію.",
+            **rk,
+        )
 
     await _finalize_session_disk_and_youtube(update, context, reply_anchor=msg)
     return ConversationHandler.END

@@ -14,7 +14,7 @@ import speakers_catalog
 _ROOT = Path(__file__).resolve().parent
 SYSTEM_PROMPT_FILE = _ROOT / "system_promt.txt"
 
-# Насправді YouTube рахує скаляри UTF-16 для title; 100 — безпечне ціле з документації.
+# YouTube liveBroadcasts.snippet.title: 1–100 одиниць UTF-16; символи < і > заборонені.
 YOUTUBE_TITLE_MAX_CHARS = 100
 YOUTUBE_DESCRIPTION_MAX_CHARS = 5000
 # Документація згадує верхню межу кількості тегів; обмежуємо розумно для моделі.
@@ -481,6 +481,42 @@ def merge_bundle_with_normalized_input(bundle: dict[str, Any], inp: dict[str, An
     return merged
 
 
+def _utf16_units(s: str) -> int:
+    return len(s.encode("utf-16-le")) // 2
+
+
+def fit_youtube_title(title: str, max_units: int | None = None) -> str:
+    """Заголовок для liveBroadcasts.insert: без < >, один рядок, не довше ліміту UTF-16."""
+    limit = YOUTUBE_TITLE_MAX_CHARS if max_units is None else max(1, int(max_units))
+    parts: list[str] = []
+    for ch in str(title):
+        if ch in "<>":
+            continue
+        if ch.isspace() or ord(ch) < 32:
+            parts.append(" ")
+            continue
+        parts.append(ch)
+    cleaned = " ".join("".join(parts).split()).strip()
+    if _utf16_units(cleaned) <= limit:
+        return cleaned
+
+    ellipsis = "..."
+    budget = limit - _utf16_units(ellipsis)
+    acc: list[str] = []
+    used = 0
+    cap = budget if budget > 0 else limit
+    for ch in cleaned:
+        units = _utf16_units(ch)
+        if used + units > cap:
+            break
+        acc.append(ch)
+        used += units
+    body = "".join(acc).rstrip()
+    if budget > 0:
+        return body + ellipsis
+    return body
+
+
 def apply_youtube_hard_limits(
     bundle: dict[str, Any], inp: dict[str, Any], *, trim_description: bool = True
 ) -> dict[str, Any]:
@@ -494,8 +530,7 @@ def apply_youtube_hard_limits(
     yt = out["youtube"]
     title = str(yt.get("title", ""))
     desc = str(yt.get("description", ""))
-    if len(title) > tmax:
-        yt["title"] = title[: max(0, tmax - 1)].rstrip() + "..."
+    yt["title"] = fit_youtube_title(title, tmax)
     if trim_description:
         dmax = int(lim.get("description_max") or YOUTUBE_DESCRIPTION_MAX_CHARS)
         if len(desc) > dmax:
